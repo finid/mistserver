@@ -10,6 +10,7 @@
 #include <mist/ts_packet.h> //TS support
 #include <mist/dtsc.h> //DTSC support
 #include <mist/mp4.h> //For initdata conversion
+#include <mist/mp4_generic.h> //For initdata conversion
 #include <mist/config.h>
 
 ///\brief Holds everything unique to converters.
@@ -24,18 +25,29 @@ namespace Converters {
     DTSC::Stream Strm;
     int PacketNumber = 0;
     long long unsigned int TimeStamp = 0;
-    int ThisNaluSize;
+    unsigned int ThisNaluSize;
     char VideoCounter = 0;
     char AudioCounter = 0;
-    bool WritePesHeader;
-    bool IsKeyFrame;
+    bool IsKeyFrame = false;
     MP4::AVCC avccbox;
     bool haveAvcc = false;
     std::stringstream TSBuf;
+    int videoID = -1;
+    int audioID = -1;
 
 
     while (std::cin.good()){
       if (Strm.parsePacket(StrData)){
+        if ((videoID == -1 || audioID == -1) && Strm.metadata){
+          for (std::map<int,DTSC::Track>::iterator it = Strm.metadata.tracks.begin(); it != Strm.metadata.tracks.end(); it++){
+            if (videoID == -1 && it->second.type == "video"){
+              videoID = it->first;
+            }
+            if (audioID == -1 && it->second.type == "audio"){
+              audioID = it->first;
+            }
+          }
+        }
         if (Strm.lastType() == DTSC::PAUSEMARK){
           TSBuf.flush();
           if (TSBuf.str().size()){
@@ -46,7 +58,7 @@ namespace Converters {
           TSBuf.str("");
         }
         if ( !haveAvcc){
-          avccbox.setPayload(Strm.metadata["video"]["init"].asString());
+          avccbox.setPayload(Strm.metadata.tracks[videoID].init);
           haveAvcc = true;
         }
         if (Strm.lastType() == DTSC::VIDEO || Strm.lastType() == DTSC::AUDIO){
@@ -63,14 +75,14 @@ namespace Converters {
           int PIDno = 0;
           char * ContCounter = 0;
           if (Strm.lastType() == DTSC::VIDEO){
-            IsKeyFrame = Strm.getPacket(0).isMember("keyframe");
+            IsKeyFrame = Strm.getPacket().isMember("keyframe");
             if (IsKeyFrame){
-              TimeStamp = (Strm.getPacket(0)["time"].asInt() * 27000);
+              TimeStamp = (Strm.getPacket()["time"].asInt() * 27000);
             }
             ToPack.append(avccbox.asAnnexB());
             while (Strm.lastData().size()){
               ThisNaluSize = (Strm.lastData()[0] << 24) + (Strm.lastData()[1] << 16) + (Strm.lastData()[2] << 8) + Strm.lastData()[3];
-              Strm.lastData().replace(0, 4, TS::NalHeader, 4);
+              Strm.lastData().replace(0, 4, "\000\000\000\001", 4);
               if (ThisNaluSize + 4 == Strm.lastData().size()){
                 ToPack.append(Strm.lastData());
                 break;
@@ -79,13 +91,13 @@ namespace Converters {
                 Strm.lastData().erase(0, ThisNaluSize + 4);
               }
             }
-            ToPack.prepend(TS::Packet::getPESVideoLeadIn(0ul, Strm.getPacket(0)["time"].asInt() * 90));
+            ToPack.prepend(TS::Packet::getPESVideoLeadIn(0ul, Strm.getPacket()["time"].asInt() * 90));
             PIDno = 0x100;
             ContCounter = &VideoCounter;
           }else if (Strm.lastType() == DTSC::AUDIO){
-            ToPack.append(TS::GetAudioHeader(Strm.lastData().size(), Strm.metadata["audio"]["init"].asString()));
+            ToPack.append(TS::GetAudioHeader(Strm.lastData().size(), Strm.metadata.tracks[audioID].init));
             ToPack.append(Strm.lastData());
-            ToPack.prepend(TS::Packet::getPESAudioLeadIn(ToPack.bytes(1073741824ul), Strm.getPacket(0)["time"].asInt() * 90));
+            ToPack.prepend(TS::Packet::getPESAudioLeadIn(ToPack.bytes(1073741824ul), Strm.getPacket()["time"].asInt() * 90));
             PIDno = 0x101;
             ContCounter = &AudioCounter;
           }

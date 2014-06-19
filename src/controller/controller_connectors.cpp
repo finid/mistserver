@@ -1,3 +1,7 @@
+#include <stdio.h> // cout, cerr
+#include <string> 
+#include <cstring>   // strcpy
+#include <sys/stat.h> //stat
 #include <mist/json.h>
 #include <mist/config.h>
 #include <mist/procs.h>
@@ -5,103 +9,140 @@
 #include "controller_storage.h"
 #include "controller_connectors.h"
 
+#include <iostream>
+
+
 ///\brief Holds everything unique to the controller.
 namespace Controller {
 
-  static std::map<std::string, std::string> currentConnectors; ///<The currently running connectors.
+  static std::map<long long, std::string> currentConnectors; ///<The currently running connectors.
+
+
+  static inline std::string toConn(long long i){
+    return std::string("Conn") + JSON::Value(i).asString();
+  }
 
   ///\brief Checks if the binary mentioned in the protocol argument is currently active, if so, restarts it.
   ///\param protocol The protocol to check.
   void UpdateProtocol(std::string protocol){
-    std::map<std::string, std::string>::iterator iter;
+    std::map<long long, std::string>::iterator iter;
     for (iter = currentConnectors.begin(); iter != currentConnectors.end(); iter++){
       if (iter->second.substr(0, protocol.size()) == protocol){
-        Log("CONF", "Restarting connector for update: " + iter->second);
-        Util::Procs::Stop(iter->first);
-        int i = 0;
-        while (Util::Procs::isActive(iter->first) && i < 30){
-          Util::sleep(100);
-        }
-        if (i >= 30){
-          Log("WARN", "Connector still active 3 seconds after shutdown - delaying restart.");
-        }else{
-          Util::Procs::Start(iter->first, Util::getMyPath() + iter->second);
-        }
-        return;
+        Log("CONF", "Killing connector for update: " + iter->second);
+        Util::Procs::Stop(toConn(iter->first));
       }
     }
   }
+  
+  static inline void builPipedPart(JSON::Value & p, char * argarr[], int & argnum, JSON::Value & argset){
+    for (JSON::ObjIter it = argset.ObjBegin(); it != argset.ObjEnd(); ++it){
+      if (it->second.isMember("option") && p.isMember(it->first)){
+        if (it->second.isMember("type")){
+          if (it->second["type"].asStringRef() == "str" && !p[it->first].isString()){
+            p[it->first] = p[it->first].asString();
+          }
+          if ((it->second["type"].asStringRef() == "uint" || it->second["type"].asStringRef() == "int") && !p[it->first].isInt()){
+            p[it->first] = JSON::Value(p[it->first].asInt()).asString();
+          }
+        }
+        if (p[it->first].asStringRef().size() > 0){
+          argarr[argnum++] = (char*)(it->second["option"].c_str());
+          argarr[argnum++] = (char*)(p[it->first].c_str());
+        }
+      }
+    }
+  }
+  
+  static inline void buildPipedArguments(JSON::Value & p, char * argarr[], JSON::Value & capabilities){
+    int argnum = 0;
+    static std::string tmparg;
+    tmparg = Util::getMyPath() + std::string("MistOut") + p["connector"].asStringRef();
+    struct stat buf;
+    if (::stat(tmparg.c_str(), &buf) != 0){
+      tmparg = Util::getMyPath() + std::string("MistConn") + p["connector"].asStringRef();
+    }
+    if (::stat(tmparg.c_str(), &buf) != 0){
+      return;
+    }
+    argarr[argnum++] = (char*)tmparg.c_str();
+    argarr[argnum++] = (char*)"-n";
+    JSON::Value & pipedCapa = capabilities["connectors"][p["connector"].asStringRef()];
+    if (pipedCapa.isMember("required")){builPipedPart(p, argarr, argnum, pipedCapa["required"]);}
+    if (pipedCapa.isMember("optional")){builPipedPart(p, argarr, argnum, pipedCapa["optional"]);}
+  }
 
-  ///\brief Checks current protocol configuration, updates state of enabled connectors if neccesary.
+  ///\brief Checks current protocol coguration, updates state of enabled connectors if neccesary.
   ///\param p An object containing all protocols.
-  void CheckProtocols(JSON::Value & p){
-    std::map<std::string, std::string> new_connectors;
-    std::map<std::string, std::string>::iterator iter;
-    bool haveHTTPgeneric = false;
-    bool haveHTTPspecific = false;
+  ///\param capabilities An object containing the detected capabilities.
+  void CheckProtocols(JSON::Value & p, JSON::Value & capabilities){
+    std::map<long long, std::string> new_connectors;
+    std::map<long long, std::string>::iterator iter;
+
+    // used for building args
+    int zero = 0;
+    int out = fileno(stdout);
+    int err = fileno(stderr);
+    char * argarr[15];	// approx max # of args (with a wide margin)
+    int i;
 
     std::string tmp;
-    JSON::Value counter = (long long int)0;
+    long long counter = 0;
 
     for (JSON::ArrIter ait = p.ArrBegin(); ait != p.ArrEnd(); ait++){
-      if ( !( *ait).isMember("connector") || ( *ait)["connector"].asString() == ""){
+      ( *ait).removeMember("online");
+      #define connName (*ait)["connector"].asStringRef()
+      if ( !(*ait).isMember("connector") || connName == ""){
         continue;
       }
-
-      tmp = std::string("MistConn") + ( *ait)["connector"].asString() + std::string(" -n");
-      if (( *ait)["connector"].asString() == "HTTP"){
-        haveHTTPgeneric = true;
+      
+      if ( !capabilities["connectors"].isMember(connName)){
+        Log("WARN", connName + " connector is enabled but doesn't exist on system! Ignoring connector.");
+        continue;
       }
-      if (( *ait)["connector"].asString() != "HTTP" && ( *ait)["connector"].asString().substr(0, 4) == "HTTP"){
-        haveHTTPspecific = true;
+      
+      #define connCapa capabilities["connectors"][connName]
+      if (connCapa.isMember("required")){
+        bool gotAll = true;
+        for (JSON::ObjIter it = connCapa["required"].ObjBegin(); it != connCapa["required"].ObjEnd(); ++it){
+          if ( !(*ait).isMember(it->first) || (*ait)[it->first].asStringRef().size() < 1){
+            gotAll = false;
+            Log("WARN", connName + " connector is missing required parameter " + it->first + "! Ignoring connector.");
+            break;
+          }
+        }
+        if (!gotAll){continue;}
       }
+      
+      /// \todo Check dependencies?
 
-      if (( *ait).isMember("port") && ( *ait)["port"].asInt() != 0){
-        tmp += std::string(" -p ") + ( *ait)["port"].asString();
-      }
-
-      if (( *ait).isMember("interface") && ( *ait)["interface"].asString() != "" && ( *ait)["interface"].asString() != "0.0.0.0"){
-        tmp += std::string(" -i ") + ( *ait)["interface"].asString();
-      }
-
-      if (( *ait).isMember("username") && ( *ait)["username"].asString() != "" && ( *ait)["username"].asString() != "root"){
-        tmp += std::string(" -u ") + ( *ait)["username"].asString();
-      }
-
-      if (( *ait).isMember("args") && ( *ait)["args"].asString() != ""){
-        tmp += std::string(" ") + ( *ait)["args"].asString();
-      }
-
-      counter = counter.asInt() + 1;
-      new_connectors[std::string("Conn") + counter.asString()] = tmp;
-      if (Util::Procs::isActive(std::string("Conn") + counter.asString())){
+      new_connectors[counter] = (*ait).toString();
+      if (Util::Procs::isActive(toConn(counter))){
         ( *ait)["online"] = 1;
       }else{
         ( *ait)["online"] = 0;
       }
+      counter++;
     }
 
     //shut down deleted/changed connectors
     for (iter = currentConnectors.begin(); iter != currentConnectors.end(); iter++){
       if (new_connectors.count(iter->first) != 1 || new_connectors[iter->first] != iter->second){
-        Log("CONF", "Stopping connector: " + iter->second);
-        Util::Procs::Stop(iter->first);
+        Log("CONF", "Stopping connector " + iter->second);
+        Util::Procs::Stop(toConn(iter->first));
       }
     }
 
     //start up new/changed connectors
     for (iter = new_connectors.begin(); iter != new_connectors.end(); iter++){
-      if (currentConnectors.count(iter->first) != 1 || currentConnectors[iter->first] != iter->second || !Util::Procs::isActive(iter->first)){
+      if (currentConnectors.count(iter->first) != 1 || currentConnectors[iter->first] != iter->second || !Util::Procs::isActive(toConn(iter->first))){
         Log("CONF", "Starting connector: " + iter->second);
-        Util::Procs::Start(iter->first, Util::getMyPath() + iter->second);
+        // clear out old args
+        for (i=0; i<15; i++){argarr[i] = 0;}
+        // get args for this connector
+        buildPipedArguments(p[(long long unsigned)iter->first], (char **)&argarr, capabilities);
+        // start piped w/ generated args
+        Util::Procs::StartPiped(toConn(iter->first), argarr, &zero, &out, &err);
       }
-    }
-
-    if (haveHTTPgeneric && !haveHTTPspecific){
-      Log("WARN", "HTTP Connector is enabled but no HTTP-based protocols are active!");
-    }
-    if ( !haveHTTPgeneric && haveHTTPspecific){
-      Log("WARN", "HTTP-based protocols will not work without the generic HTTP connector!");
     }
 
     //store new state

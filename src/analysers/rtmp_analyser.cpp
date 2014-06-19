@@ -52,6 +52,7 @@ namespace Analysers {
     FLV::Tag F; //FLV holder
     AMF::Object amfdata("empty", AMF::AMF0_DDV_CONTAINER);
     AMF::Object3 amf3data("empty", AMF::AMF3_DDV_CONTAINER);
+    unsigned int read_in = 0;
 
     while (std::cin.good() || inbuffer.size()){
       if (next.Parse(inbuffer)){
@@ -61,8 +62,8 @@ namespace Analysers {
         }
         switch (next.msg_type_id){
           case 0: //does not exist
-            fprintf(stderr, "Error chunk - %i, %i, %i, %i, %i\n", next.cs_id, next.timestamp, next.real_len, next.len_left, next.msg_stream_id);
-            //return 0;
+            fprintf(stderr, "Error chunk @ %lu - CS%i, T%i, L%i, LL%i, MID%i\n", read_in-inbuffer.size(), next.cs_id, next.timestamp, next.real_len, next.len_left, next.msg_stream_id);
+            return 0;
             break; //happens when connection breaks unexpectedly
           case 1: //set chunk size
             RTMPStream::chunk_rec_max = ntohl(*(int*)next.data.c_str());
@@ -117,23 +118,11 @@ namespace Analysers {
             fprintf(stderr, "CTRL: Set peer bandwidth: %i\n", RTMPStream::snd_window_size);
             break;
           case 8:
-            if (Detail & (DETAIL_EXPLICIT | DETAIL_RECONSTRUCT)){
-              F.ChunkLoader(next);
-              if (Detail & DETAIL_EXPLICIT){
-                fprintf(stderr, "Received %i bytes audio data\n", next.len);
-                std::cerr << "Got a " << F.len << " bytes " << F.tagType() << " FLV tag of time " << F.tagTime() << "." << std::endl;
-              }
-              if (Detail & DETAIL_RECONSTRUCT){
-                std::cout.write(F.data, F.len);
-              }
-            }
-            break;
           case 9:
             if (Detail & (DETAIL_EXPLICIT | DETAIL_RECONSTRUCT)){
               F.ChunkLoader(next);
               if (Detail & DETAIL_EXPLICIT){
-                fprintf(stderr, "Received %i bytes video data\n", next.len);
-                std::cerr << "Got a " << F.len << " bytes " << F.tagType() << " FLV tag of time " << F.tagTime() << "." << std::endl;
+                std::cerr << "[" << F.tagTime() << "+" << F.offset() << "] " << F.tagType() << std::endl;
               }
               if (Detail & DETAIL_RECONSTRUCT){
                 std::cout.write(F.data, F.len);
@@ -189,6 +178,7 @@ namespace Analysers {
       }else{ //if chunk parsed
         if (std::cin.good()){
           inbuffer += std::cin.get();
+          ++read_in;
         }else{
           inbuffer.clear();
         }

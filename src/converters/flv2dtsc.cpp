@@ -3,6 +3,7 @@
 
 #include <iostream>
 #include <sstream>
+#include <fstream>
 #include <string>
 #include <vector>
 #include <cstdlib>
@@ -21,15 +22,15 @@ namespace Converters {
 
   ///\brief Converts FLV from stdin to DTSC on stdout.
   ///\return The return code for the converter.
-  int FLV2DTSC(){
+  int FLV2DTSC(std::ostream & output){
     FLV::Tag FLV_in; // Temporary storage for incoming FLV data.
-    JSON::Value meta_out; // Storage for outgoing header data.
+    DTSC::Meta meta_out; // Storage for outgoing header data.
     JSON::Value pack_out; // Storage for outgoing data.
     std::stringstream prebuffer; // Temporary buffer before sending real data
     bool sending = false;
     unsigned int counter = 0;
 
-    while ( !feof(stdin)){
+    while ( !feof(stdin) && !FLV::Parse_Error){
       if (FLV_in.FileLoader(stdin)){
         pack_out = FLV_in.toJSON(meta_out);
         if (pack_out.isNull()){
@@ -39,37 +40,31 @@ namespace Converters {
           counter++;
           if (counter > 8){
             sending = true;
-            meta_out["moreheader"] = 0LL;
-            std::string packed_header = meta_out.toPacked();
-            unsigned int size = htonl(packed_header.size());
-            std::cout << std::string(DTSC::Magic_Header, 4) << std::string((char*) &size, 4) << packed_header;
-            std::cout << prebuffer.rdbuf();
+            output << meta_out.toJSON().toNetPacked();
+            output << prebuffer.rdbuf();
             prebuffer.str("");
             std::cerr << "Buffer done, starting real-time output..." << std::endl;
           }else{
-            std::string packed_out = pack_out.toPacked();
-            unsigned int size = htonl(packed_out.size());
-            prebuffer << std::string(DTSC::Magic_Packet, 4) << std::string((char*) &size, 4) << packed_out;
+            prebuffer << pack_out.toNetPacked();
             continue; //don't also write
           }
         }
         //simply write
-        std::string packed_out = pack_out.toPacked();
-        unsigned int size = htonl(packed_out.size());
-        std::cout << std::string(DTSC::Magic_Packet, 4) << std::string((char*) &size, 4) << packed_out;
+        output << pack_out.toNetPacked();
       }
+    }
+    if (FLV::Parse_Error){
+      std::cerr << "Conversion failed: " << FLV::Error_Str << std::endl;
+      return 0;
     }
 
     // if the FLV input is very short, do output it correctly...
     if ( !sending){
       std::cerr << "EOF - outputting buffer..." << std::endl;
-      meta_out["moreheader"] = 0LL;
-      std::string packed_header = meta_out.toPacked();
-      unsigned int size = htonl(packed_header.size());
-      std::cout << std::string(DTSC::Magic_Header, 4) << std::string((char*) &size, 4) << packed_header;
-      std::cout << prebuffer.rdbuf();
+      output << meta_out.toJSON().toNetPacked();
+      output << prebuffer.rdbuf();
     }
-    std::cerr << "Done!" << std::endl;
+    std::cerr << "Done! If you output this data to a file, don't forget to run MistDTSCFix next." << std::endl;
 
     return 0;
   } //FLV2DTSC
@@ -79,6 +74,13 @@ namespace Converters {
 ///\brief Entry point for FLV2DTSC, simply calls Converters::FLV2DTSC().
 int main(int argc, char ** argv){
   Util::Config conf = Util::Config(argv[0], PACKAGE_VERSION);
+  conf.addOption("output",
+      JSON::fromString(
+          "{\"long\":\"output\", \"value\":[\"stdout\"], \"short\":\"o\", \"arg\":\"string\", \"help\":\"Name of the outputfile or stdout for standard output.\"}"));
   conf.parseArgs(argc, argv);
-  return Converters::FLV2DTSC();
+  if (conf.getString("output") == "stdout"){
+    return Converters::FLV2DTSC(std::cout);
+  }
+  std::ofstream oFile(conf.getString("output").c_str());
+  return Converters::FLV2DTSC(oFile);
 } //main

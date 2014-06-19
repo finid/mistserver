@@ -27,20 +27,31 @@ namespace Converters {
     char charBuffer[1024 * 10];
     unsigned int charCount;
     bool doneheader = false;
+    int videoID = -1, audioID = -1;
 
     while (std::cin.good()){
       if (Strm.parsePacket(inBuffer)){
         if ( !doneheader){
+          //find first audio and video tracks
+          for (std::map<int,DTSC::Track>::iterator it = Strm.metadata.tracks.begin(); it != Strm.metadata.tracks.end(); it++){
+            if (videoID == -1 && it->second.type == "video"){
+              videoID = it->first;
+            }
+            if (audioID == -1 && it->second.type == "audio"){
+              audioID = it->first;
+            }
+          }
+          
           doneheader = true;
           std::cout.write(FLV::Header, 13);
-          FLV_out.DTSCMetaInit(Strm);
+          FLV_out.DTSCMetaInit(Strm, Strm.metadata.tracks[videoID], Strm.metadata.tracks[audioID]);
           std::cout.write(FLV_out.data, FLV_out.len);
-          if (Strm.metadata.isMember("video") && Strm.metadata["video"].isMember("init")){
-            FLV_out.DTSCVideoInit(Strm);
+          if (videoID != -1){
+            FLV_out.DTSCVideoInit(Strm.metadata.tracks[videoID]);
             std::cout.write(FLV_out.data, FLV_out.len);
           }
-          if (Strm.metadata.isMember("audio") && Strm.metadata["audio"].isMember("init")){
-            FLV_out.DTSCAudioInit(Strm);
+          if (audioID != -1){
+            FLV_out.DTSCAudioInit(Strm.metadata.tracks[audioID]);
             std::cout.write(FLV_out.data, FLV_out.len);
           }
         }
